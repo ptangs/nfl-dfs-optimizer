@@ -39,11 +39,6 @@ if 'group_counts' not in st.session_state:
 # ==============================================================================
 
 def load_and_clean_data(file_or_path):
-    """
-    Robustly loads the CSV by scanning for the header row and flexibly 
-    mapping incoming columns to internal standards. Handles both uploaded
-    Streamlit files and local string file paths.
-    """
     try:
         preview = pd.read_csv(file_or_path, nrows=20, header=None, encoding='utf-8-sig')
         header_row_idx = None
@@ -58,7 +53,6 @@ def load_and_clean_data(file_or_path):
             st.error("Could not detect a valid header row. Ensure your CSV has headers like 'Player' or 'Name + ID'.")
             return None
 
-        # Reset pointer if it's an uploaded file object
         if hasattr(file_or_path, 'seek'):
             file_or_path.seek(0)
             
@@ -141,7 +135,8 @@ def load_and_clean_data(file_or_path):
         valid_pos = ['QB', 'RB', 'WR', 'TE', 'DST']
         df = df[df['Position'].isin(valid_pos)].reset_index(drop=True)
         
-        st.session_state.exposure_counts = {i: 0 for i in df.index.tolist()}
+        # Track exposures by ID instead of row index to prevent shifting errors
+        st.session_state.exposure_counts = {pid: 0 for pid in df['ID'].tolist()}
         return df
 
     except Exception as e:
@@ -260,14 +255,16 @@ def run_optimization(player_df, num_lineups, min_salary, stack_qb, min_pc, max_p
             df['Optimization_Proj'] = df[opt_metric]
 
         for i in player_ids:
+            pid = df.loc[i, 'ID']
             min_exp_pct = df.loc[i, 'Min Exposure (%)']
             if min_exp_pct > 0:
                 target_count = int(np.ceil((min_exp_pct / 100.0) * num_lineups))
-                if st.session_state.exposure_counts.get(i, 0) < target_count:
+                if st.session_state.exposure_counts.get(pid, 0) < target_count:
                     df.loc[i, 'Optimization_Proj'] += 1000
 
-        prob = lp.LpProblem(f"NFL_Lineup_{k}", lp.LpMaximize)
-        player_vars = lp.LpVariable.dicts("Player", player_ids, 0, 1, lp.LpBinary)
+        # Cloud-safe solver parameters (avoiding pulp constants that can be missing in some environments)
+        prob = lp.LpProblem(f"NFL_Lineup_{k}", sense=-1) 
+        player_vars = lp.LpVariable.dicts("Player", indexs=player_ids, lowBound=0, upBound=1, cat='Binary')
         
         prob += lp.lpSum([df.loc[i, 'Optimization_Proj'] * player_vars[i] for i in player_ids])
         prob += lp.lpSum([df.loc[i, 'Salary'] * player_vars[i] for i in player_ids]) <= SALARY_CAP
@@ -317,7 +314,7 @@ def run_optimization(player_df, num_lineups, min_salary, stack_qb, min_pc, max_p
             curr_g_count = st.session_state.group_counts.get(g_name, 0)
             remaining_lineups = num_lineups - k
             
-            z_grp = lp.LpVariable(f"Group_{grp['id']}_{k}", 0, 1, lp.LpBinary)
+            z_grp = lp.LpVariable(f"Group_{grp['id']}_{k}", lowBound=0, upBound=1, cat='Binary')
             group_vars[g_name] = z_grp
             
             prob += lp.lpSum([player_vars[idx] for idx in grp['indices']]) - (grp['size'] * z_grp) >= 0
@@ -331,13 +328,14 @@ def run_optimization(player_df, num_lineups, min_salary, stack_qb, min_pc, max_p
                 prob += z_grp == 1
 
         for i in player_ids:
+            pid = df.loc[i, 'ID']
             effective_max_pct = min(df.loc[i, 'Max Exposure (%)'], global_max_pct, exposure_settings.get(df.loc[i, 'Position'], 100)) / 100.0
-            if st.session_state.exposure_counts.get(i, 0) >= int(np.ceil(effective_max_pct * num_lineups)):
+            if st.session_state.exposure_counts.get(pid, 0) >= int(np.ceil(effective_max_pct * num_lineups)):
                 prob += player_vars[i] == 0
 
         prob.solve(lp.PULP_CBC_CMD(msg=0)) 
         
-        if prob.status == lp.LpStatusOptimal:
+        if prob.status == 1: # 1 represents Optimal in PuLP
             current_ids = [i for i in player_ids if player_vars[i].varValue == 1.0]
             
             n_rb = len([i for i in current_ids if df.loc[i, 'Position'] == 'RB'])
@@ -348,8 +346,10 @@ def run_optimization(player_df, num_lineups, min_salary, stack_qb, min_pc, max_p
             elif n_wr > 3: flex_counts['WR'] += 1
             elif n_te > 1: flex_counts['TE'] += 1
             
+            # Map back to unique player IDs to increment counts
             for i in current_ids:
-                st.session_state.exposure_counts[i] = st.session_state.exposure_counts.get(i, 0) + 1
+                pid = df.loc[i, 'ID']
+                st.session_state.exposure_counts[pid] = st.session_state.exposure_counts.get(pid, 0) + 1
             
             for grp in active_groups:
                 if all(idx in current_ids for idx in grp['indices']):
@@ -558,7 +558,7 @@ else:
     st.divider()
     
     if st.button("🚀 Run Optimizer", type="primary"):
-        st.session_state.exposure_counts = {i: 0 for i in st.session_state.player_data.index}
+        st.session_state.exposure_counts = {pid: 0 for pid in st.session_state.player_data['ID'].tolist()}
         st.session_state.group_counts = {grp['name']: 0 for grp in st.session_state.custom_groups}
         
         with st.spinner("Optimizing..."):
@@ -612,13 +612,15 @@ else:
 
             st.subheader("Player Exposure Report")
             exp_data = []
-            for idx, count in st.session_state.exposure_counts.items():
+            for pid, count in st.session_state.exposure_counts.items():
                 if count > 0:
-                    r = st.session_state.player_data.loc[idx]
-                    exp_data.append({
-                        'Player': r['Name'], 'Pos': r['Position'], 'Team': r['Team'],
-                        'Lineups': count, 'Exposure (%)': (count/len(results_df))*100
-                    })
+                    r = st.session_state.player_data[st.session_state.player_data['ID'] == pid]
+                    if not r.empty:
+                        r = r.iloc[0]
+                        exp_data.append({
+                            'Player': r['Name'], 'Pos': r['Position'], 'Team': r['Team'],
+                            'Lineups': count, 'Exposure (%)': (count/len(results_df))*100
+                        })
                     
             if exp_data:
                 exp_df = pd.DataFrame(exp_data).sort_values('Lineups', ascending=False)
@@ -629,28 +631,4 @@ else:
                             "Exposure (%)", format="%.1f%%", min_value=0, max_value=100
                         ),
                     },
-                    hide_index=True, use_container_width=True
-                )
-
-            st.divider()
-
-            with st.expander(f"📋 View All {len(results_df)} Individual Lineups", expanded=False):
-                for _, row in results_df.iterrows():
-                    cols = st.columns(3)
-                    cols[0].metric(f"Lineup {row['Lineup Num']}", f"{row['Total Points']:.2f} {opt_metric}")
-                    cols[1].metric("Salary", f"${row['Salary']}")
-                    cols[2].metric("Rem. Salary", f"${SALARY_CAP - row['Salary']}")
-                    
-                    display_metric = opt_metric if opt_metric in row['Lineup_DF'].columns else 'Projection'
-                    st.dataframe(
-                        row['Lineup_DF'][['Position', 'Name', 'Team', 'Salary', display_metric]],
-                        column_config={
-                            "Position": st.column_config.Column("POS", width="small"),
-                            "Name": st.column_config.Column("PLAYER", width="large"),
-                            "Team": st.column_config.Column("TEAM", width="small"),
-                            "Salary": st.column_config.NumberColumn("SALARY ($)", format="$%d"),
-                            display_metric: st.column_config.NumberColumn(display_metric.upper(), format="%.2f"),
-                        },
-                        hide_index=True, use_container_width=True
-                    )
-                    st.markdown("---")
+                    hide_index=True
