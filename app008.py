@@ -262,7 +262,7 @@ def run_optimization(player_df, num_lineups, min_salary, stack_qb, min_pc, max_p
                     df.loc[i, 'Optimization_Proj'] += 1000
 
         prob = lp.LpProblem(f"NFL_Lineup_{k}", sense=-1) 
-        player_vars = lp.LpVariable.dicts("Player", indexs=player_ids, lowBound=0, upBound=1, cat='Binary')
+        player_vars = lp.LpVariable.dicts("Player", player_ids, 0, 1, "Binary")
         
         prob += lp.lpSum([df.loc[i, 'Optimization_Proj'] * player_vars[i] for i in player_ids])
         prob += lp.lpSum([df.loc[i, 'Salary'] * player_vars[i] for i in player_ids]) <= SALARY_CAP
@@ -312,7 +312,7 @@ def run_optimization(player_df, num_lineups, min_salary, stack_qb, min_pc, max_p
             curr_g_count = st.session_state.group_counts.get(g_name, 0)
             remaining_lineups = num_lineups - k
             
-            z_grp = lp.LpVariable(f"Group_{grp['id']}_{k}", lowBound=0, upBound=1, cat='Binary')
+            z_grp = lp.LpVariable(f"Group_{grp['id']}_{k}", 0, 1, "Binary")
             group_vars[g_name] = z_grp
             
             prob += lp.lpSum([player_vars[idx] for idx in grp['indices']]) - (grp['size'] * z_grp) >= 0
