@@ -101,7 +101,7 @@ def load_and_clean_data(file_or_path):
         df = df.rename(columns=rename_dict)
 
         if 'ID' not in rename_dict.values() and 'Name' in df.columns and df['Name'].astype(str).str.contains(r'\(\d+\)').any():
-            df['ID'] = df['Name'].str.extract(r'\((\d+)\)')
+            df['ID'] = df['Name'].str.extract(r'\(\d+\)')
             df['Name'] = df['Name'].str.replace(r'\s*\(\d+\)', '', regex=True)
 
         df['ID'] = df['ID'].astype(str)
@@ -135,7 +135,6 @@ def load_and_clean_data(file_or_path):
         valid_pos = ['QB', 'RB', 'WR', 'TE', 'DST']
         df = df[df['Position'].isin(valid_pos)].reset_index(drop=True)
         
-        # Track exposures by ID instead of row index to prevent shifting errors
         st.session_state.exposure_counts = {pid: 0 for pid in df['ID'].tolist()}
         return df
 
@@ -262,7 +261,6 @@ def run_optimization(player_df, num_lineups, min_salary, stack_qb, min_pc, max_p
                 if st.session_state.exposure_counts.get(pid, 0) < target_count:
                     df.loc[i, 'Optimization_Proj'] += 1000
 
-        # Cloud-safe solver parameters (avoiding pulp constants that can be missing in some environments)
         prob = lp.LpProblem(f"NFL_Lineup_{k}", sense=-1) 
         player_vars = lp.LpVariable.dicts("Player", indexs=player_ids, lowBound=0, upBound=1, cat='Binary')
         
@@ -335,7 +333,7 @@ def run_optimization(player_df, num_lineups, min_salary, stack_qb, min_pc, max_p
 
         prob.solve(lp.PULP_CBC_CMD(msg=0)) 
         
-        if prob.status == 1: # 1 represents Optimal in PuLP
+        if prob.status == 1: 
             current_ids = [i for i in player_ids if player_vars[i].varValue == 1.0]
             
             n_rb = len([i for i in current_ids if df.loc[i, 'Position'] == 'RB'])
@@ -346,7 +344,6 @@ def run_optimization(player_df, num_lineups, min_salary, stack_qb, min_pc, max_p
             elif n_wr > 3: flex_counts['WR'] += 1
             elif n_te > 1: flex_counts['TE'] += 1
             
-            # Map back to unique player IDs to increment counts
             for i in current_ids:
                 pid = df.loc[i, 'ID']
                 st.session_state.exposure_counts[pid] = st.session_state.exposure_counts.get(pid, 0) + 1
@@ -631,4 +628,28 @@ else:
                             "Exposure (%)", format="%.1f%%", min_value=0, max_value=100
                         ),
                     },
-                    hide_index=True
+                    hide_index=True, use_container_width=True
+                )
+
+            st.divider()
+
+            with st.expander(f"📋 View All {len(results_df)} Individual Lineups", expanded=False):
+                for _, row in results_df.iterrows():
+                    cols = st.columns(3)
+                    cols[0].metric(f"Lineup {row['Lineup Num']}", f"{row['Total Points']:.2f} {opt_metric}")
+                    cols[1].metric("Salary", f"${row['Salary']}")
+                    cols[2].metric("Rem. Salary", f"${SALARY_CAP - row['Salary']}")
+                    
+                    display_metric = opt_metric if opt_metric in row['Lineup_DF'].columns else 'Projection'
+                    st.dataframe(
+                        row['Lineup_DF'][['Position', 'Name', 'Team', 'Salary', display_metric]],
+                        column_config={
+                            "Position": st.column_config.Column("POS", width="small"),
+                            "Name": st.column_config.Column("PLAYER", width="large"),
+                            "Team": st.column_config.Column("TEAM", width="small"),
+                            "Salary": st.column_config.NumberColumn("SALARY ($)", format="$%d"),
+                            display_metric: st.column_config.NumberColumn(display_metric.upper(), format="%.2f"),
+                        },
+                        hide_index=True, use_container_width=True
+                    )
+                    st.markdown("---")
