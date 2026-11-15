@@ -327,7 +327,19 @@ def run_optimization(player_df, num_lineups, min_salary, stack_qb, min_pc, max_p
 
         for i in player_ids:
             pid = df.loc[i, 'ID']
-            effective_max_pct = min(df.loc[i, 'Max Exposure (%)'], global_max_pct, exposure_settings.get(df.loc[i, 'Position'], 100)) / 100.0
+            
+            player_max = df.loc[i, 'Max Exposure (%)']
+            player_min = df.loc[i, 'Min Exposure (%)']
+            
+            # 1. If an individual player's Max % is manually adjusted from 100, it overrides global settings.
+            # 2. Otherwise, use the global/positional cap.
+            # 3. Ensure the calculated Max never prevents a manually set Min Exposure from being reached.
+            if player_max != 100:
+                effective_max_pct = player_max / 100.0
+            else:
+                base_max = min(global_max_pct, exposure_settings.get(df.loc[i, 'Position'], 100))
+                effective_max_pct = max(base_max, player_min) / 100.0
+                
             if st.session_state.exposure_counts.get(pid, 0) >= int(np.ceil(effective_max_pct * num_lineups)):
                 prob += player_vars[i] == 0
 
