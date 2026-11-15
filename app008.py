@@ -1,3 +1,4 @@
+Python
 import streamlit as st
 import pandas as pd
 import pulp as lp
@@ -135,6 +136,7 @@ def load_and_clean_data(file_or_path):
         valid_pos = ['QB', 'RB', 'WR', 'TE', 'DST']
         df = df[df['Position'].isin(valid_pos)].reset_index(drop=True)
         
+        # Track exposures by ID instead of row index to prevent shifting errors
         st.session_state.exposure_counts = {pid: 0 for pid in df['ID'].tolist()}
         return df
 
@@ -261,6 +263,14 @@ def run_optimization(player_df, num_lineups, min_salary, stack_qb, min_pc, max_p
                 if st.session_state.exposure_counts.get(pid, 0) < target_count:
                     df.loc[i, 'Optimization_Proj'] += 1000
 
+        # Boost group members if the group still needs to hit its minimum exposure
+        for grp in active_groups:
+            needed = grp['min_count'] - st.session_state.group_counts.get(grp['name'], 0)
+            if needed > 0:
+                for idx in grp['indices']:
+                    df.loc[idx, 'Optimization_Proj'] += 1000
+
+        # Cloud-safe solver parameters (avoiding pulp constants that can be missing in some environments)
         prob = lp.LpProblem(f"NFL_Lineup_{k}", sense=-1) 
         player_vars = lp.LpVariable.dicts("Player", player_ids, 0, 1, "Binary")
         
@@ -306,28 +316,42 @@ def run_optimization(player_df, num_lineups, min_salary, stack_qb, min_pc, max_p
             for exc_idx in excl_indices:
                 prob += player_vars[trig_idx] + player_vars[exc_idx] <= 1
 
-        group_vars = {}
         for grp in active_groups:
             g_name = grp['name']
             curr_g_count = st.session_state.group_counts.get(g_name, 0)
             remaining_lineups = num_lineups - k
             
-            z_grp = lp.LpVariable(f"Group_{grp['id']}_{k}", 0, 1, "Binary")
-            group_vars[g_name] = z_grp
-            
-            prob += lp.lpSum([player_vars[idx] for idx in grp['indices']]) - (grp['size'] * z_grp) >= 0
-            
+            # Max Exposure: strictly prevent all players in the group from being selected together
             if curr_g_count >= grp['max_count']:
-                prob += z_grp == 0
                 prob += lp.lpSum([player_vars[idx] for idx in grp['indices']]) <= (grp['size'] - 1)
                 
+            # Min Exposure: force the group if we are running out of lineups
             needed = grp['min_count'] - curr_g_count
             if needed > 0 and needed >= remaining_lineups:
-                prob += z_grp == 1
+                
+                # SAFETY VALVE: Check if any group member has already hit their individual Max Exposure limit
+                can_force = True
+                for idx in grp['indices']:
+                    pid = df.loc[idx, 'ID']
+                    player_max = df.loc[idx, 'Max Exposure (%)']
+                    player_min = df.loc[idx, 'Min Exposure (%)']
+                    
+                    if player_max != 100:
+                        eff_max = player_max / 100.0
+                    else:
+                        base_max = min(global_max_pct, exposure_settings.get(df.loc[idx, 'Position'], 100))
+                        eff_max = max(base_max, player_min) / 100.0
+                        
+                    if st.session_state.exposure_counts.get(pid, 0) >= int(np.ceil(eff_max * num_lineups)):
+                        can_force = False
+                        break
+                        
+                # Only force the group if it won't crash the solver
+                if can_force:
+                    prob += lp.lpSum([player_vars[idx] for idx in grp['indices']]) == grp['size']
 
         for i in player_ids:
             pid = df.loc[i, 'ID']
-            
             player_max = df.loc[i, 'Max Exposure (%)']
             player_min = df.loc[i, 'Min Exposure (%)']
             
